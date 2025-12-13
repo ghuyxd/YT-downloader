@@ -1,5 +1,6 @@
 # User specific
 settings.json
+ffmpeg.exe
 
 # Build and environments
 venv/
