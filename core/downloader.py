@@ -1,63 +1,17 @@
 import os
 import subprocess
-import re
 import yt_dlp
+from .utils import sanitize_filename, get_ffmpeg_path, check_ffmpeg
 
-class YouTubeDownloaderCore:
+class VideoDownloader:
     def __init__(self):
-        self.video_formats = ['MP4', 'MKV']
-        self.audio_formats = ['MP3', 'M4A', 'WAV']
-        
-        # Determine paths for local executables
-        self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.ffmpeg_path = os.path.join(self.script_dir, 'ffmpeg.exe')
-
-
+        self.ffmpeg_path = get_ffmpeg_path()
+    
     def check_executable_paths(self):
-        """Verify that local executables exist. Returns list of missing files."""
         missing = []
         if not os.path.exists(self.ffmpeg_path):
             missing.append('ffmpeg.exe')
-
         return missing
-
-    def check_ffmpeg(self):
-        if not os.path.exists(self.ffmpeg_path):
-            return False
-        try:
-            subprocess.run([self.ffmpeg_path, '-version'], capture_output=True, check=True)
-            return True
-        except Exception:
-            return False
-
-    def sanitize_filename(self, filename):
-        filename = re.sub(r'[<>:"/\\|?*]', '', filename)
-        filename = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', filename)
-        filename = filename.strip('. ')
-        return filename[:200]
-
-    def detect_url_type(self, url):
-        if any(x in url.lower() for x in ['playlist', 'list=', '&list=']):
-            return 'playlist'
-        elif any(x in url.lower() for x in ['watch?v=', 'youtu.be/', '/watch/']):
-            return 'video'
-        elif any(x in url.lower() for x in ['channel/', '/c/', '/@']):
-            return 'channel'
-        else:
-            try:
-                opts = {'quiet': True, 'no_warnings': True}
-                if os.path.exists(self.ffmpeg_path):
-                    opts['ffmpeg_location'] = self.ffmpeg_path
-                    
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=False, process=False)
-                    if info.get('_type') == 'playlist':
-                        return 'playlist'
-                    elif info.get('_type') == 'video' or 'entries' not in info:
-                        return 'video'
-            except:
-                pass
-            return 'unknown'
 
     def get_video_info(self, url):
         ydl_opts = {
@@ -69,8 +23,7 @@ class YouTubeDownloaderCore:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 return info
-        except Exception as e:
-            # In a real app we might want to log this
+        except Exception:
             return None
 
     def get_quality_options(self, info):
@@ -97,9 +50,6 @@ class YouTubeDownloaderCore:
         return sorted_qualities
 
     def download_single_video(self, url, selected_format, target_format, title, download_dir="downloads", progress_hooks=None, channel=None, channel_id=None):
-        """
-        Returns: (success, message)
-        """
         if not download_dir:
             download_dir = "downloads"
         os.makedirs(download_dir, exist_ok=True)
@@ -107,7 +57,7 @@ class YouTubeDownloaderCore:
         if channel and channel_id:
             title += f" - [{channel} - @{channel_id}]"
             
-        safe_title = self.sanitize_filename(title)
+        safe_title = sanitize_filename(title)
         temp_video = os.path.join(download_dir, f"temp_video_{safe_title}")
         temp_audio = os.path.join(download_dir, f"temp_audio_{safe_title}")
         final_file = os.path.join(download_dir, f"{safe_title}.{target_format}")
@@ -118,7 +68,7 @@ class YouTubeDownloaderCore:
             direct_success = self._try_direct_download(url, selected_format, target_format, final_file, progress_hooks)
             if direct_success:
                 return True, "Downloaded successfully (direct)"
-            if not self.check_ffmpeg():
+            if not check_ffmpeg():
                 return False, "FFmpeg required for video+audio merge!"
             success = self._download_and_merge_video(url, selected_format, target_format,
                                                 temp_video, temp_audio, final_file, progress_hooks)
@@ -210,7 +160,7 @@ class YouTubeDownloaderCore:
             except:
                 pass
             return success
-        except Exception as e:
+        except Exception:
             return False
 
     def _find_downloaded_file(self, base_path):
@@ -247,13 +197,10 @@ class YouTubeDownloaderCore:
             result = subprocess.run(cmd_copy, capture_output=True, text=True)
             return result.returncode == 0 and os.path.exists(output_file)
 
-        except Exception as e:
+        except Exception:
             return False
 
     def download_single_audio(self, url, target_format, title, download_dir="downloads", progress_hooks=None, channel=None, channel_id=None):
-        """
-        Returns: (success, message)
-        """
         if not download_dir:
             download_dir = "downloads"
         os.makedirs(download_dir, exist_ok=True)
@@ -261,7 +208,7 @@ class YouTubeDownloaderCore:
         if channel and channel_id:
             title += f" - [{channel} - @{channel_id}]"
             
-        safe_title = self.sanitize_filename(title)
+        safe_title = sanitize_filename(title)
         final_file = os.path.join(download_dir, f"{safe_title}.{target_format}")
         
         if os.path.exists(final_file):
@@ -296,178 +243,3 @@ class YouTubeDownloaderCore:
                 return False, "Audio download failed"
         except Exception as e:
             return False, f"Audio download error: {str(e)}"
-
-    def get_playlist_info(self, url, limit=None):
-        url = self.preprocess_playlist_url(url)
-        
-        # Helper to set limit
-        def apply_limit(opts):
-            if limit:
-                opts['playlistend'] = limit
-            else:
-                if 'playlistend' in opts:
-                     del opts['playlistend']
-            return opts
-
-        methods = [
-            apply_limit({
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': True,
-                'ignoreerrors': True,
-                'ffmpeg_location': self.ffmpeg_path,
-            }),
-            apply_limit({
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': 'in_playlist',
-                'ignoreerrors': True,
-                'playlistreverse': False,
-                'ffmpeg_location': self.ffmpeg_path,
-            }),
-            apply_limit({
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-                'skip_download': True,
-                'ignoreerrors': True,
-                'writeinfojson': False,
-                'ffmpeg_location': self.ffmpeg_path,
-            }),
-            apply_limit({
-                'quiet': True,
-                'no_warnings': True,
-                'flat_playlist': True,
-                'ignoreerrors': True,
-                'ffmpeg_location': self.ffmpeg_path,
-            })
-        ]
-        for ydl_opts in methods:
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if not info:
-                        continue
-                    if 'entries' in info:
-                        entries = [e for e in info['entries'] if e is not None]
-                        valid_entries = []
-                        for entry in entries:
-                            if self.is_valid_entry(entry):
-                                valid_entries.append(entry)
-                        if valid_entries:
-                            info['entries'] = valid_entries
-                            return info
-                    elif info.get('_type') == 'video' or 'title' in info:
-                        return {
-                            'title': f"Single Video: {info.get('title', 'Unknown')}",
-                            'entries': [info],
-                            '_type': 'playlist',
-                            'playlist_count': 1
-                        }
-                    elif 'channel' in url.lower() or '/@' in url:
-                        res = self.handle_channel_url(url, ydl_opts)
-                        if res: return res
-            except Exception:
-                continue
-        return self.fallback_playlist_extraction(url)
-
-    def preprocess_playlist_url(self, url):
-        if '&list=' in url and 'watch?v=' in url:
-            list_match = re.search(r'[&?]list=([^&]+)', url)
-            if list_match:
-                playlist_id = list_match.group(1)
-                if playlist_id.startswith('RD'):
-                    return url
-                return f"https://www.youtube.com/playlist?list={playlist_id}"
-        if '/channel/' in url or '/@' in url or '/c/' in url:
-            return self.convert_channel_to_playlist(url)
-        return url
-
-    def convert_channel_to_playlist(self, url):
-        try:
-            opts = {'quiet': True, 'no_warnings': True}
-            if os.path.exists(self.ffmpeg_path):
-                opts['ffmpeg_location'] = self.ffmpeg_path
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False, process=False)
-                if info and 'channel_id' in info:
-                    channel_id = info['channel_id']
-                    if channel_id.startswith('UC'):
-                        uploads_id = 'UU' + channel_id[2:]
-                        return f"https://www.youtube.com/playlist?list={uploads_id}"
-        except:
-            pass
-        return url
-
-    def is_valid_entry(self, entry):
-        if not entry or not isinstance(entry, dict):
-            return False
-        if not (entry.get('id') and entry.get('title')):
-            return False
-        if entry.get('title') in ['[Private video]', '[Deleted video]', 'Private video', 'Deleted video']:
-            return False
-        if entry.get('duration') == 0:
-            return False
-        return True
-
-    def handle_channel_url(self, url, ydl_opts):
-        try:
-            channel_opts = ydl_opts.copy()
-            channel_opts['playlistend'] = 100
-            with yt_dlp.YoutubeDL(channel_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info and 'entries' in info:
-                    entries = [e for e in info['entries'] if self.is_valid_entry(e)]
-                    if entries:
-                        return {
-                            'title': info.get('title', 'Channel Videos'),
-                            'entries': entries,
-                            '_type': 'playlist'
-                        }
-        except:
-            pass
-        return None
-
-    def fallback_playlist_extraction(self, url):
-        try:
-            simple_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'ignoreerrors': True,
-                'extract_flat': True,
-                'playlistend': 50,
-                'ffmpeg_location': self.ffmpeg_path,
-            }
-            with yt_dlp.YoutubeDL(simple_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info:
-                    if 'entries' in info:
-                        entries = [e for e in info['entries'] if e]
-                        if entries:
-                            return {
-                                'title': info.get('title', 'Playlist'),
-                                'entries': entries,
-                                '_type': 'playlist'
-                            }
-                    else:
-                        return {
-                            'title': f"Single Item: {info.get('title', 'Unknown')}",
-                            'entries': [info],
-                            '_type': 'playlist'
-                        }
-        except:
-            pass
-        return None
-
-    def construct_video_url(self, entry):
-        if not entry:
-            return None
-        for url_field in ['webpage_url', 'url']:
-            if entry.get(url_field):
-                url = entry[url_field]
-                if 'youtube.com' in url or 'youtu.be' in url:
-                    return url
-        video_id = entry.get('id')
-        if video_id:
-            return f"https://www.youtube.com/watch?v={video_id}"
-        return None

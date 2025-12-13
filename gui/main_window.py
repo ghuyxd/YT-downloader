@@ -1,351 +1,16 @@
-
-import sys
 import os
-import json
-import requests
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLineEdit, QPushButton, QLabel, 
-                             QComboBox, QTextEdit, QProgressBar, QMessageBox,
-                             QTabWidget, QGroupBox, QScrollArea, QFrame, QCheckBox,
-                             QListWidget, QListWidgetItem, QFileDialog)
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QSize, QSettings, QRect
-from PySide6.QtGui import QIcon, QFont, QColor, QPalette, QPixmap, QImage, QPainter, QLinearGradient, QBrush, QPen, QPainterPath
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QLineEdit, QLabel, 
+                             QComboBox, QMessageBox,
+                             QGroupBox, QListWidget, QListWidgetItem, QFileDialog)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QColor, QPalette
 
 from core import YouTubeDownloaderCore
+from .settings import SettingsManager
+from .threads import ImageLoader, AnalyzeThread, DownloadThread
+from .components import GradientButton
 
-# -----------------------------------------------------------------------------
-# Utils & Managers
-# -----------------------------------------------------------------------------
-
-class SettingsManager:
-    DEFAULT_SETTINGS = {
-        "download_dir": os.path.join(os.path.expanduser("~"), "Downloads"),
-        "last_quality": "Best Quality",
-        "last_format": "mp4",
-        "last_type": 0, # 0 for Video+Audio, 1 for Audio Only
-        "playlist_limit": "50"
-    }
-    
-    def __init__(self, filename="settings.json"):
-        self.filename = filename
-        self.settings = self.load()
-        
-    def load(self):
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r') as f:
-                    return {**self.DEFAULT_SETTINGS, **json.load(f)}
-            except Exception:
-                return self.DEFAULT_SETTINGS.copy()
-        return self.DEFAULT_SETTINGS.copy()
-
-    def save(self):
-        try:
-            with open(self.filename, 'w') as f:
-                json.dump(self.settings, f, indent=4)
-        except Exception as e:
-            print(f"Failed to save settings: {e}")
-
-    def get(self, key):
-        return self.settings.get(key, self.DEFAULT_SETTINGS.get(key))
-
-    def set(self, key, value):
-        self.settings[key] = value
-        self.save()
-
-class ImageLoader(QThread):
-    finished = Signal(QPixmap)
-
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-
-    def run(self):
-        try:
-            if not self.url:
-                return
-            response = requests.get(self.url, timeout=10)
-            response.raise_for_status()
-            image = QImage()
-            image.loadFromData(response.content)
-            pixmap = QPixmap.fromImage(image)
-            self.finished.emit(pixmap)
-        except Exception:
-            pass
-
-# -----------------------------------------------------------------------------
-# Work Threads
-# -----------------------------------------------------------------------------
-
-class AnalyzeThread(QThread):
-    finished = Signal(dict, str) # result, type ('video' or 'playlist')
-    error = Signal(str)
-
-    def __init__(self, core, url, limit=None):
-        super().__init__()
-        self.core = core
-        self.url = url
-        self.limit = limit
-
-    def run(self):
-        try:
-            url_type = self.core.detect_url_type(self.url)
-            if url_type == 'playlist':
-                info = self.core.get_playlist_info(self.url, limit=self.limit)
-                if info:
-                    self.finished.emit(info, 'playlist')
-                else:
-                    self.error.emit("Could not analyze playlist.")
-            elif url_type == 'video':
-                info = self.core.get_video_info(self.url)
-                if info:
-                    self.finished.emit(info, 'video')
-                else:
-                    self.error.emit("Could not analyze video.")
-            else:
-                # Try as video fallback
-                info = self.core.get_video_info(self.url)
-                if info:
-                    self.finished.emit(info, 'video')
-                else:
-                    self.error.emit("Unsupported URL or analysis failed.")
-        except Exception as e:
-            self.error.emit(str(e))
-
-class DownloadThread(QThread):
-    progress_update = Signal(float, str) # percentage, status text
-    finished = Signal(bool, str)
-
-    def __init__(self, core, task_type, data, download_dir):
-        super().__init__()
-        self.core = core
-        self.task_type = task_type # 'video' or 'playlist'
-        self.data = data
-        self.download_dir = download_dir
-
-    def progress_hook(self, d):
-        if d['status'] == 'downloading':
-            try:
-                p = d.get('_percent_str', '0%').replace('%', '')
-                percent = float(p)
-                speed = d.get('_speed_str', 'N/A')
-                eta = d.get('_eta_str', 'N/A')
-                if eta == 'N/A' and d.get('eta'):
-                    eta_sec = d.get('eta')
-                    if isinstance(eta_sec, (int, float)):
-                        eta = f"{int(eta_sec)//60}:{int(eta_sec)%60:02d}"
-                total_bytes = d.get('_total_bytes_str') or d.get('_total_bytes_estimate_str', 'N/A')
-                
-                # User requested full format: [download] 21.6% of ~ 92.31MiB at 7.03MiB/s ETA 00:10
-                status_text = f"{percent}% of {total_bytes} at {speed} ETA {eta}"
-                self.progress_update.emit(percent, status_text)
-            except Exception:
-                pass
-        elif d['status'] == 'finished':
-             self.progress_update.emit(100, "Processing completed. Finalizing...")
-
-    def run(self):
-        try:
-            hooks = [self.progress_hook]
-            
-            if self.task_type == 'video':
-                self._download_video(hooks)
-            elif self.task_type == 'playlist':
-                self._download_playlist(hooks)
-        except Exception as e:
-            self.finished.emit(False, str(e))
-
-    def _download_video(self, hooks):
-        url = self.data['url']
-        selected_quality = self.data.get('quality')
-        target_format = self.data['format']
-        title = self.data['title']
-        is_audio = self.data['is_audio']
-        
-        self.progress_update.emit(0, f"Starting download: {title}")
-        
-        channel = self.data.get('channel')
-        channel_id = self.data.get('channel_id')
-        
-        if is_audio:
-            success, msg = self.core.download_single_audio(url, target_format, title, self.download_dir, hooks, channel=channel, channel_id=channel_id)
-        else:
-            success, msg = self.core.download_single_video(url, selected_quality, target_format, title, self.download_dir, hooks, channel=channel, channel_id=channel_id)
-            
-        self.progress_update.emit(100, "Done")
-        self.finished.emit(success, msg)
-
-    def _download_playlist(self, hooks):
-        playlist_info = self.data['info']
-        media_type = self.data['media_type'] # 'video' or 'audio'
-        quality = self.data.get('quality')
-        target_format = self.data['format']
-        selected_indices = self.data.get('selected_indices', []) 
-        
-        entries = playlist_info.get('entries', [])
-        valid_entries = []
-        
-        # Filter only selected entries
-        if selected_indices:
-            for idx in selected_indices:
-                if 0 <= idx < len(entries):
-                    entry = entries[idx]
-                    if entry and self.core.construct_video_url(entry):
-                        entry['_constructed_url'] = self.core.construct_video_url(entry)
-                        valid_entries.append(entry)
-        else:
-             for entry in entries:
-                if entry and self.core.construct_video_url(entry):
-                    entry['_constructed_url'] = self.core.construct_video_url(entry)
-                    valid_entries.append(entry)
-                
-        total = len(valid_entries)
-        playlist_title = playlist_info.get('title', 'Unknown Playlist')
-        safe_playlist_name = self.core.sanitize_filename(playlist_title)
-        
-        final_dir = os.path.join(self.download_dir, safe_playlist_name)
-        os.makedirs(final_dir, exist_ok=True)
-        
-        successful_count = 0
-        
-        for i, entry in enumerate(valid_entries, 1):
-            title = entry.get('title', f'Video_{i}')
-            url = entry.get('_constructed_url')
-            
-            self.progress_update.emit(0, f"[{i}/{total}] Downloading: {title[:30]}...")
-            
-            channel = entry.get('uploader')
-            channel_id = entry.get('uploader_id')
-            
-            try:
-                if media_type == 'video':
-                    success, msg = self.core.download_single_video(url, quality, target_format, title, str(final_dir), hooks, channel=channel, channel_id=channel_id)
-                else:
-                    success, msg = self.core.download_single_audio(url, target_format, title, str(final_dir), hooks, channel=channel, channel_id=channel_id)
-                
-                if success:
-                    successful_count += 1
-            except Exception as e:
-                pass
-                
-        self.progress_update.emit(100, f"Playlist finished.")
-        self.finished.emit(True, f"Playlist finished. {successful_count}/{total} successful.")
-
-
-# -----------------------------------------------------------------------------
-# Components
-# -----------------------------------------------------------------------------
-
-class GradientButton(QPushButton):
-    def __init__(self, text, parent=None):
-        super().__init__(text, parent)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(40)
-        self.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        self._hover = False
-        
-    def enterEvent(self, event):
-        self._hover = True
-        self.update()
-        super().enterEvent(event)
-        
-    def leaveEvent(self, event):
-        self._hover = False
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        # Gradient: Cyan Theme
-        gradient = QLinearGradient(0, 0, self.width(), 0)
-        if self.isEnabled():
-            if self._hover:
-                gradient.setColorAt(0, QColor("#00E5FF")) # Cyan Accent
-                gradient.setColorAt(1, QColor("#00B8D4")) 
-            else:
-                gradient.setColorAt(0, QColor("#00BCD4")) 
-                gradient.setColorAt(1, QColor("#00838F")) 
-        else:
-            gradient.setColorAt(0, QColor("#555")) 
-            gradient.setColorAt(1, QColor("#555")) 
-            
-        rect = self.rect()
-        painter.setBrush(QBrush(gradient))
-        painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(rect, 4, 4)
-        
-        # Text
-        painter.setPen(Qt.black if self.isEnabled() else Qt.white)
-        font = self.font()
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(rect, Qt.AlignCenter, self.text())
-
-class ProgressButton(GradientButton):
-    def __init__(self, text, parent=None):
-        super().__init__(text, parent)
-        self._progress = 0.0 # 0.0 to 100.0
-        self.original_text = text
-        self.status_text = text
-
-    def set_progress(self, value):
-        self._progress = max(0.0, min(100.0, float(value)))
-        self.update()
-
-    def set_status(self, text):
-        self.status_text = text
-        self.update()
-        
-    def reset(self):
-        self._progress = 0.0
-        self.status_text = self.original_text
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        rect = self.rect()
-        
-        # 1. Background
-        bg = QColor("#333")
-        painter.setBrush(bg)
-        painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(rect, 4, 4)
-        
-        # 2. Progress Fill (Cyan Gradient)
-        if self._progress > 0:
-            fill_width = int(rect.width() * (self._progress / 100.0))
-            if fill_width > 0:
-                gradient = QLinearGradient(0, 0, rect.width(), 0)
-                gradient.setColorAt(0, QColor("#00E5FF")) 
-                gradient.setColorAt(1, QColor("#00838F"))
-                
-                painter.setBrush(QBrush(gradient))
-                
-                # Draw only the filled portion, but clipped to rounded rect
-                # Since we want simple rounded rect fill:
-                painter.save()
-                path = QPainterPath()
-                path.addRoundedRect(rect, 4, 4)
-                painter.setClipPath(path)
-                
-                painter.drawRect(0, 0, fill_width, rect.height())
-                painter.restore()
-
-        # 3. Text
-        painter.setPen(Qt.white)
-        font = self.font()
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(rect, Qt.AlignCenter, self.status_text)
-
-
-# -----------------------------------------------------------------------------
-# Main Window
-# -----------------------------------------------------------------------------
 
 class MediaDownloaderGUI(QMainWindow):
     def __init__(self):
@@ -360,10 +25,9 @@ class MediaDownloaderGUI(QMainWindow):
         self.setup_ui()
         self.setup_dark_theme()
         
-        # Check executables
         missing = self.core.check_executable_paths()
         if missing:
-             QMessageBox.warning(self, "Warning", f"Missing executables: {', '.join(missing)}")
+            QMessageBox.warning(self, "Warning", f"Missing executables: {', '.join(missing)}")
 
     def setup_ui(self):
         main_widget = QWidget()
@@ -395,7 +59,6 @@ class MediaDownloaderGUI(QMainWindow):
         config_group.setFixedHeight(80)
         config_layout = QHBoxLayout()
         
-        # Location
         config_layout.addWidget(QLabel("Save to:"))
         self.path_input = QLineEdit()
         self.path_input.setText(self.settings.get("download_dir"))
@@ -407,10 +70,8 @@ class MediaDownloaderGUI(QMainWindow):
         self.browse_btn = GradientButton("Browse")
         self.browse_btn.setFixedWidth(80)
         self.browse_btn.clicked.connect(self.browse_path)
-        self.browse_btn.clicked.connect(self.browse_path)
         config_layout.addWidget(self.browse_btn)
 
-        # Playlist Limit
         config_layout.addWidget(QLabel("Limit:"))
         self.limit_combo = QComboBox()
         self.limit_combo.setFixedWidth(80)
@@ -459,7 +120,6 @@ class MediaDownloaderGUI(QMainWindow):
         opts_group = QGroupBox("Download Options")
         opts_layout = QVBoxLayout()
         
-        # Type
         type_row = QHBoxLayout()
         type_row.addWidget(QLabel("Type:"))
         self.type_combo = QComboBox()
@@ -470,7 +130,6 @@ class MediaDownloaderGUI(QMainWindow):
         type_row.addWidget(self.type_combo)
         opts_layout.addLayout(type_row)
         
-        # Quality
         qual_row = QHBoxLayout()
         qual_row.addWidget(QLabel("Quality:"))
         self.quality_combo = QComboBox()
@@ -478,7 +137,6 @@ class MediaDownloaderGUI(QMainWindow):
         qual_row.addWidget(self.quality_combo)
         opts_layout.addLayout(qual_row)
         
-        # Format
         fmt_row = QHBoxLayout()
         fmt_row.addWidget(QLabel("Format:"))
         self.format_combo = QComboBox()
@@ -489,7 +147,7 @@ class MediaDownloaderGUI(QMainWindow):
         opts_group.setLayout(opts_layout)
         right_layout.addWidget(opts_group)
         
-        # Playlist Selection (Conditional)
+        # Playlist Selection
         self.playlist_group = QGroupBox("Select Videos")
         playlist_layout = QVBoxLayout()
         
@@ -519,13 +177,12 @@ class MediaDownloaderGUI(QMainWindow):
         self.content_area.setVisible(False)
         layout.addWidget(self.content_area, stretch=1)
         
-        # 4. Footer (Progress & Actions)
+        # 4. Footer
         footer_widget = QWidget()
         footer_layout = QVBoxLayout(footer_widget)
         footer_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Replaced Standard Button with ProgressButton
-        self.download_btn = ProgressButton("START DOWNLOAD")
+        self.download_btn = GradientButton("START DOWNLOAD")
         self.download_btn.setFixedHeight(50)
         self.download_btn.setFont(QFont("Segoe UI", 12, QFont.Bold))
         self.download_btn.clicked.connect(self.start_download)
@@ -566,7 +223,7 @@ class MediaDownloaderGUI(QMainWindow):
     def on_path_changed(self):
         new_path = self.path_input.text().strip()
         if new_path and os.path.exists(new_path):
-             self.settings.set("download_dir", new_path)
+            self.settings.set("download_dir", new_path)
             
     def select_all_items(self):
         for i in range(self.playlist_widget.count()):
@@ -587,13 +244,9 @@ class MediaDownloaderGUI(QMainWindow):
             
         self.analyze_btn.setEnabled(False)
         self.analyze_btn.setText("Analyzing...")
-        self.download_btn.reset()
         self.download_btn.setVisible(False)
         self.content_area.setVisible(False)
         
-        self.content_area.setVisible(False)
-        
-        # Get Limit
         limit_str = self.limit_combo.currentText().strip()
         self.settings.set("playlist_limit", limit_str)
         
@@ -602,7 +255,7 @@ class MediaDownloaderGUI(QMainWindow):
             try:
                 limit = int(limit_str)
             except ValueError:
-                limit = 50 # Default fallback
+                limit = 50
 
         self.analyze_thread = AnalyzeThread(self.core, url, limit)
         self.analyze_thread.finished.connect(self.on_analyze_finished)
@@ -615,7 +268,6 @@ class MediaDownloaderGUI(QMainWindow):
         self.current_info = info
         self.current_type = url_type
         
-        # Display Info
         title = info.get('title', 'Unknown')
         
         if url_type == 'playlist':
@@ -629,14 +281,13 @@ class MediaDownloaderGUI(QMainWindow):
             self.info_label.setText(f"🎬 Video: {title}\n⏱️ Duration: {duration_str}")
             self.playlist_group.setVisible(False)
             
-        # Load Thumbnail
         thumb_url = info.get('thumbnail')
         if not thumb_url and url_type == 'playlist':
             entries = info.get('entries', [])
             if entries:
                 first_entry = entries[0]
                 if isinstance(first_entry, dict):
-                    thumb_url = first_entry.get('thumbnail') # Try to get from first entry
+                    thumb_url = first_entry.get('thumbnail')
 
         if thumb_url:
             self.image_loader = ImageLoader(thumb_url)
@@ -648,7 +299,7 @@ class MediaDownloaderGUI(QMainWindow):
         self.content_area.setVisible(True)
         self.download_btn.setVisible(True)
         self.download_btn.setEnabled(True)
-        self.download_btn.reset()
+        self.download_btn.setText("START DOWNLOAD")
         
         self.update_options()
         
@@ -663,7 +314,7 @@ class MediaDownloaderGUI(QMainWindow):
             title = entry.get('title', f"Video {i}")
             item = QListWidgetItem(f"{i}. {title}")
             item.setCheckState(Qt.Checked)
-            item.setData(Qt.UserRole, i-1) 
+            item.setData(Qt.UserRole, i-1)
             self.playlist_widget.addItem(item)
             
     def on_analyze_error(self, error_msg):
@@ -677,7 +328,6 @@ class MediaDownloaderGUI(QMainWindow):
             
         is_audio = self.type_combo.currentIndex() == 1
         
-        # Update Qualities
         self.quality_combo.clear()
         
         last_quality = self.settings.get("last_quality")
@@ -696,15 +346,12 @@ class MediaDownloaderGUI(QMainWindow):
                 else:
                     self.quality_combo.addItem("Best Available")
             else:
-                # Playlist simplified options
                 self.quality_combo.addItems(["Best Quality", "1080p", "720p", "480p"])
         
-        # Restore last quality selection if possible
         index = self.quality_combo.findText(last_quality, Qt.MatchContains)
         if index >= 0:
             self.quality_combo.setCurrentIndex(index)
 
-        # Update Formats
         self.format_combo.clear()
         if is_audio:
             self.format_combo.addItems(self.core.audio_formats)
@@ -720,11 +367,9 @@ class MediaDownloaderGUI(QMainWindow):
         if not self.current_info:
             return
             
-        # Get settings
         is_audio = self.type_combo.currentIndex() == 1
         target_format = self.format_combo.currentText().lower()
         
-        # Save settings
         self.settings.set("last_type", self.type_combo.currentIndex())
         self.settings.set("last_format", target_format)
         if not is_audio:
@@ -736,7 +381,6 @@ class MediaDownloaderGUI(QMainWindow):
         }
         
         if self.current_type == 'video':
-            data['url'] = self.url_input.text().strip()
             data['url'] = self.url_input.text().strip()
             data['title'] = self.current_info.get('title', 'video')
             data['channel'] = self.current_info.get('uploader')
@@ -754,7 +398,6 @@ class MediaDownloaderGUI(QMainWindow):
             data['info'] = self.current_info
             data['media_type'] = 'audio' if is_audio else 'video'
             
-            # Get selected indices
             selected_indices = []
             for i in range(self.playlist_widget.count()):
                 item = self.playlist_widget.item(i)
@@ -772,7 +415,7 @@ class MediaDownloaderGUI(QMainWindow):
                 if "1080" in q_text: height = 1080
                 elif "720" in q_text: height = 720
                 elif "480" in q_text: height = 480
-                else: height = 2160 # Best
+                else: height = 2160
                 data['quality'] = {'height': height}
             else:
                 data['quality'] = None
@@ -780,30 +423,19 @@ class MediaDownloaderGUI(QMainWindow):
             self.download_thread = DownloadThread(self.core, 'playlist', data, self.path_input.text())
 
         self.download_btn.setEnabled(False)
-        self.download_btn.set_status("Initializing...")
+        self.download_btn.setText("Downloading...")
         
         self.download_thread.progress_update.connect(self.update_progress)
         self.download_thread.finished.connect(self.on_download_finished)
         self.download_thread.start()
         
     def update_progress(self, percent, text):
-        self.download_btn.set_progress(percent)
-        self.download_btn.set_status(str(text))
+        pass
 
     def on_download_finished(self, success, msg):
         self.download_btn.setEnabled(True)
+        self.download_btn.setText("START DOWNLOAD")
         if success:
-            self.download_btn.set_progress(100)
-            self.download_btn.set_status("DOWNLOAD COMPLETE")
             QMessageBox.information(self, "Success", msg)
         else:
-            self.download_btn.set_progress(0)
-            self.download_btn.set_status("FAILED - RETRY")
             QMessageBox.critical(self, "Failed", msg)
-        self.download_btn.reset()
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MediaDownloaderGUI()
-    window.show()
-    sys.exit(app.exec())
