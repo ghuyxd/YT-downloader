@@ -1,17 +1,35 @@
 import os
 import subprocess
+import shutil
 import yt_dlp
 from .utils import sanitize_filename, get_ffmpeg_path, check_ffmpeg
+
+CACHE_DIR = '.ytd-cache'
 
 class VideoDownloader:
     def __init__(self):
         self.ffmpeg_path = get_ffmpeg_path()
     
     def check_executable_paths(self):
+        """Check if ffmpeg is available in PATH. Returns list of missing executables."""
         missing = []
-        if not os.path.exists(self.ffmpeg_path):
-            missing.append('ffmpeg.exe')
+        if not shutil.which('ffmpeg'):
+            missing.append('ffmpeg')
         return missing
+    
+    def _get_cache_dir(self, download_dir):
+        """Get cache directory path inside download directory."""
+        cache_path = os.path.join(download_dir, CACHE_DIR)
+        os.makedirs(cache_path, exist_ok=True)
+        return cache_path
+    
+    def _cleanup_cache(self, cache_dir):
+        """Remove cache directory if empty."""
+        try:
+            if os.path.exists(cache_dir) and not os.listdir(cache_dir):
+                os.rmdir(cache_dir)
+        except:
+            pass
 
     def get_video_info(self, url):
         ydl_opts = {
@@ -53,19 +71,20 @@ class VideoDownloader:
         if not download_dir:
             download_dir = "downloads"
         os.makedirs(download_dir, exist_ok=True)
+        cache_dir = self._get_cache_dir(download_dir)
         
         if channel and channel_id:
             title += f" - [{channel} - @{channel_id}]"
             
         safe_title = sanitize_filename(title)
-        temp_video = os.path.join(download_dir, f"temp_video_{safe_title}")
-        temp_audio = os.path.join(download_dir, f"temp_audio_{safe_title}")
+        temp_video = os.path.join(cache_dir, f"temp_video_{safe_title}")
+        temp_audio = os.path.join(cache_dir, f"temp_audio_{safe_title}")
         final_file = os.path.join(download_dir, f"{safe_title}.{target_format}")
         
         if os.path.exists(final_file):
             return True, "File already exists, skipping..."
         try:
-            direct_success = self._try_direct_download(url, selected_format, target_format, final_file, progress_hooks)
+            direct_success = self._try_direct_download(url, selected_format, target_format, final_file, download_dir, progress_hooks)
             if direct_success:
                 return True, "Downloaded successfully (direct)"
             if not check_ffmpeg():
@@ -79,15 +98,18 @@ class VideoDownloader:
         except Exception as e:
             return False, f"Download error: {str(e)}"
 
-    def _try_direct_download(self, url, selected_format, target_format, output_file, progress_hooks=None):
+    def _try_direct_download(self, url, selected_format, target_format, output_file, download_dir, progress_hooks=None):
         try:
+            cache_dir = self._get_cache_dir(download_dir)
+            cache_output = os.path.join(cache_dir, os.path.basename(output_file))
+            
             if selected_format:
                 format_selector = f"best[height<={selected_format['height']}][acodec!=none]/best[height<={selected_format['height']}]/best"
             else:
                 format_selector = "best[acodec!=none]/best"
             ydl_opts = {
                 'format': format_selector,
-                'outtmpl': output_file.replace('.mp4', '.%(ext)s'),
+                'outtmpl': cache_output.replace('.mp4', '.%(ext)s'),
                 'quiet': True,
                 'no_warnings': True,
                 'writeinfojson': False,
@@ -103,17 +125,17 @@ class VideoDownloader:
                 }]
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
-            possible_files = [
-                output_file,
-                output_file.replace(f'.{target_format}', '.mp4'),
-                output_file.replace(f'.{target_format}', '.webm'),
-                output_file.replace(f'.{target_format}', '.mkv')
-            ]
-            for file_path in possible_files:
-                if os.path.exists(file_path) and os.path.getsize(file_path) > 1024:
-                    if file_path != output_file:
-                        os.rename(file_path, output_file)
+            
+            # Check for downloaded file in cache and move to destination
+            possible_exts = [target_format, 'mp4', 'webm', 'mkv']
+            for ext in possible_exts:
+                cache_file = os.path.join(cache_dir, os.path.basename(output_file).replace(f'.{target_format}', f'.{ext}'))
+                if os.path.exists(cache_file) and os.path.getsize(cache_file) > 1024:
+                    shutil.move(cache_file, output_file)
+                    self._cleanup_cache(cache_dir)
                     return True
+            
+            self._cleanup_cache(cache_dir)
             return False
         except Exception:
             return False
@@ -157,6 +179,9 @@ class VideoDownloader:
                     os.remove(video_file)
                 if os.path.exists(audio_file):
                     os.remove(audio_file)
+                # Clean up cache directory
+                cache_dir = os.path.dirname(video_file)
+                self._cleanup_cache(cache_dir)
             except:
                 pass
             return success
@@ -204,6 +229,7 @@ class VideoDownloader:
         if not download_dir:
             download_dir = "downloads"
         os.makedirs(download_dir, exist_ok=True)
+        cache_dir = self._get_cache_dir(download_dir)
         
         if channel and channel_id:
             title += f" - [{channel} - @{channel_id}]"
@@ -216,7 +242,7 @@ class VideoDownloader:
         try:
             ydl_opts = {
                 'format': 'bestaudio/best',
-                'outtmpl': os.path.join(download_dir, f'{safe_title}.%(ext)s'),
+                'outtmpl': os.path.join(cache_dir, f'{safe_title}.%(ext)s'),
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': target_format.lower(),
@@ -231,15 +257,22 @@ class VideoDownloader:
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
-            if os.path.exists(final_file) and os.path.getsize(final_file) > 1024:
+            
+            # Check for file in cache and move to destination
+            cache_file = os.path.join(cache_dir, f"{safe_title}.{target_format}")
+            if os.path.exists(cache_file) and os.path.getsize(cache_file) > 1024:
+                shutil.move(cache_file, final_file)
+                self._cleanup_cache(cache_dir)
                 return True, "Audio downloaded successfully"
             else:
                 for ext in ['mp3', 'm4a', 'wav', 'flac']:
-                    alt_file = os.path.join(download_dir, f"{safe_title}.{ext}")
+                    alt_file = os.path.join(cache_dir, f"{safe_title}.{ext}")
                     if os.path.exists(alt_file):
-                        if ext != target_format.lower():
-                            os.rename(alt_file, final_file)
+                        shutil.move(alt_file, final_file)
+                        self._cleanup_cache(cache_dir)
                         return True, "Audio downloaded successfully (converted)"
+                self._cleanup_cache(cache_dir)
                 return False, "Audio download failed"
         except Exception as e:
+            self._cleanup_cache(cache_dir)
             return False, f"Audio download error: {str(e)}"

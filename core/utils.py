@@ -1,13 +1,20 @@
 import os
 import subprocess
 import re
+import shutil
 import yt_dlp
 
 def get_script_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def get_ffmpeg_path():
-    return os.path.join(get_script_dir(), 'ffmpeg.exe')
+    """Get ffmpeg full path from system PATH. Cross-platform."""
+    path = shutil.which('ffmpeg')
+    return path if path else 'ffmpeg'
+
+def check_ffmpeg():
+    """Check if ffmpeg is available in system PATH. Returns True if found."""
+    return shutil.which('ffmpeg') is not None
 
 def sanitize_filename(filename):
     filename = re.sub(r'[<>:"/\\|?*]', '', filename)
@@ -38,13 +45,3 @@ def detect_url_type(url):
         except:
             pass
         return 'unknown'
-
-def check_ffmpeg():
-    ffmpeg_path = get_ffmpeg_path()
-    if not os.path.exists(ffmpeg_path):
-        return False
-    try:
-        subprocess.run([ffmpeg_path, '-version'], capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
