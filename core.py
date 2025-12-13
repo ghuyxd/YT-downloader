@@ -11,15 +11,14 @@ class YouTubeDownloaderCore:
         # Determine paths for local executables
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.ffmpeg_path = os.path.join(self.script_dir, 'ffmpeg.exe')
-        self.yt_dlp_path = os.path.join(self.script_dir, 'yt-dlp.exe')
+
 
     def check_executable_paths(self):
         """Verify that local executables exist. Returns list of missing files."""
         missing = []
         if not os.path.exists(self.ffmpeg_path):
             missing.append('ffmpeg.exe')
-        if not os.path.exists(self.yt_dlp_path):
-            missing.append('yt-dlp.exe')
+
         return missing
 
     def check_ffmpeg(self):
