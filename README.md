@@ -7,8 +7,10 @@ A modern YouTube Downloader application with a beautiful GUI, built using PySide
 - 🎬 Download YouTube videos in various quality options
 - 🎵 Extract audio from videos (MP3, WAV, etc.)
 - 📋 Playlist support - download entire playlists
+- 🚀 **Smart Queue System** - Add multiple videos, reorder, and process downloads sequentially
+- ⚡ **Background Analysis** - Auto-analyze links without blocking the UI
 - ⚙️ Customizable settings (output directory, format, quality)
-- 🖥️ Clean and intuitive graphical interface
+- 🖥️ Clean and intuitive graphical interface with Dark Mode
 
 ## Requirements
 

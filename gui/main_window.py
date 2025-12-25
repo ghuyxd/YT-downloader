@@ -2,7 +2,7 @@ import os
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLineEdit, QLabel, 
                              QComboBox, QMessageBox,
-                             QGroupBox, QListWidget, QListWidgetItem, QFileDialog)
+                             QGroupBox, QListWidget, QListWidgetItem, QFileDialog, QStackedWidget)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QColor, QPalette
 
@@ -10,6 +10,7 @@ from core import YouTubeDownloaderCore
 from .settings import SettingsManager
 from .threads import ImageLoader, AnalyzeThread, DownloadThread
 from .components import GradientButton
+from .queue_ui import QueueItemWidget
 
 
 class MediaDownloaderGUI(QMainWindow):
@@ -19,6 +20,11 @@ class MediaDownloaderGUI(QMainWindow):
         self.settings = SettingsManager()
         self.current_info = None
         self.current_type = None
+        self.queue_active = False
+        
+        self.analysis_queue = []
+        self.is_analyzing_bg = False
+        self.active_threads = set() # Track running threads to prevent GC
         
         self.setWindowTitle("YT Downloader")
         self.setMinimumSize(1000, 700)
@@ -45,12 +51,15 @@ class MediaDownloaderGUI(QMainWindow):
         self.url_input.setMinimumHeight(40)
         self.url_input.setStyleSheet("QLineEdit { background-color: #2b2b2b; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 5px; font-size: 14px;}")
         
-        self.analyze_btn = GradientButton("Analyze")
-        self.analyze_btn.setFixedWidth(120)
-        self.analyze_btn.clicked.connect(self.start_analyze)
+        self.url_input.returnPressed.connect(self.add_url_to_queue)
         
         input_layout.addWidget(self.url_input)
-        input_layout.addWidget(self.analyze_btn)
+        
+        self.queue_add_btn = GradientButton("Add to Queue")
+        self.queue_add_btn.setFixedWidth(120)
+        self.queue_add_btn.clicked.connect(self.add_url_to_queue)
+        input_layout.addWidget(self.queue_add_btn)
+        
         input_group.setLayout(input_layout)
         layout.addWidget(input_group)
         
@@ -83,6 +92,15 @@ class MediaDownloaderGUI(QMainWindow):
         self.limit_combo.setStyleSheet("QComboBox { background-color: #2b2b2b; color: #fff; border: 1px solid #444; padding: 5px; }")
         config_layout.addWidget(self.limit_combo)
 
+        # Default Preferences
+        config_layout.addSpacing(20)
+        config_layout.addWidget(QLabel("Default:"))
+        
+        self.def_fmt_combo = QComboBox()
+        self.def_fmt_combo.addItems(["Video (Best)", "Audio (MP3)", "Video (1080p)", "Video (720p)"])
+        self.def_fmt_combo.setStyleSheet("QComboBox { background-color: #2b2b2b; color: #fff; border: 1px solid #444; padding: 5px; }")
+        config_layout.addWidget(self.def_fmt_combo)
+
         config_group.setLayout(config_layout)
         layout.addWidget(config_group)
 
@@ -94,6 +112,7 @@ class MediaDownloaderGUI(QMainWindow):
         
         # LEFT: Thumbnail & Info
         left_panel = QWidget()
+        left_panel.setMinimumWidth(340)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setAlignment(Qt.AlignTop)
         
@@ -106,6 +125,7 @@ class MediaDownloaderGUI(QMainWindow):
         
         self.info_label = QLabel("No content selected")
         self.info_label.setWordWrap(True)
+        self.info_label.setMinimumWidth(320)
         self.info_label.setStyleSheet("font-size: 14px; color: #ddd; font-weight: bold; margin-top: 10px;")
         left_layout.addWidget(self.info_label)
         
@@ -174,8 +194,63 @@ class MediaDownloaderGUI(QMainWindow):
         
         content_layout_grid.addWidget(right_panel, stretch=2)
         
-        self.content_area.setVisible(False)
-        layout.addWidget(self.content_area, stretch=1)
+        # wrapper for content + queue
+        center_widget = QWidget()
+        center_layout = QHBoxLayout(center_widget)
+        center_layout.setContentsMargins(0,0,0,0)
+        center_layout.setSpacing(15)
+        
+        # Left Stack (Placeholder vs Content)
+        self.left_stack = QStackedWidget()
+        
+        # 0. Placeholder
+        self.placeholder = QLabel("Ready to Download\n\nEnter a URL above to Analyze or Add to Queue")
+        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setStyleSheet("color: #444; font-size: 16px; font-weight: bold; border: 2px dashed #333; border-radius: 10px;")
+        self.left_stack.addWidget(self.placeholder)
+        
+        # 1. Content Area
+        self.content_area.setVisible(True) # Always visible within stack
+        self.left_stack.addWidget(self.content_area)
+        
+        self.left_stack.setCurrentIndex(0)
+        
+        center_layout.addWidget(self.left_stack, stretch=6)
+        
+        # Queue Panel
+        queue_panel = QGroupBox("Queue")
+        # Removed setFixedWidth to allow flexible sizing or use stretch
+        queue_panel.setMinimumWidth(320)
+        queue_panel.setMaximumWidth(400)
+        queue_layout = QVBoxLayout()
+        queue_layout.setContentsMargins(10, 15, 10, 10)
+        
+        self.queue_list = QListWidget()
+        self.queue_list.setStyleSheet("""
+            QListWidget {
+                background-color: #1e1e1e;
+                border: 1px solid #333;
+                border-radius: 6px;
+            }
+            QListWidget::item {
+                background: transparent;
+                margin-bottom: 5px;
+            }
+        """)
+        self.queue_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.queue_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.queue_list.setSpacing(4)
+        self.queue_list.itemClicked.connect(self.on_queue_item_clicked)
+        queue_layout.addWidget(self.queue_list)
+        
+        self.queue_start_btn = GradientButton("Process Queue")
+        self.queue_start_btn.clicked.connect(self.process_queue)
+        queue_layout.addWidget(self.queue_start_btn)
+        
+        queue_panel.setLayout(queue_layout)
+        center_layout.addWidget(queue_panel, stretch=4)
+        
+        layout.addWidget(center_widget, stretch=1)
         
         # 4. Footer
         footer_widget = QWidget()
@@ -245,7 +320,7 @@ class MediaDownloaderGUI(QMainWindow):
         self.analyze_btn.setEnabled(False)
         self.analyze_btn.setText("Analyzing...")
         self.download_btn.setVisible(False)
-        self.content_area.setVisible(False)
+        # self.content_area.setVisible(False) # Removed
         
         limit_str = self.limit_combo.currentText().strip()
         self.settings.set("playlist_limit", limit_str)
@@ -262,9 +337,7 @@ class MediaDownloaderGUI(QMainWindow):
         self.analyze_thread.error.connect(self.on_analyze_error)
         self.analyze_thread.start()
 
-    def on_analyze_finished(self, info, url_type):
-        self.analyze_btn.setEnabled(True)
-        self.analyze_btn.setText("Analyze")
+    def display_video_info(self, info, url_type):
         self.current_info = info
         self.current_type = url_type
         
@@ -278,7 +351,10 @@ class MediaDownloaderGUI(QMainWindow):
         else:
             duration = info.get('duration', 0)
             duration_str = f"{duration//60}:{duration%60:02d}"
-            self.info_label.setText(f"🎬 Video: {title}\n⏱️ Duration: {duration_str}")
+            desc = info.get('description', '')
+            # Show a snippet of description if available
+            short_desc = (desc[:200] + '...') if len(desc) > 200 else desc
+            self.info_label.setText(f"🎬 Video: {title}\n⏱️ Duration: {duration_str}\n\n📝 {short_desc}")
             self.playlist_group.setVisible(False)
             
         thumb_url = info.get('thumbnail')
@@ -290,18 +366,30 @@ class MediaDownloaderGUI(QMainWindow):
                     thumb_url = first_entry.get('thumbnail')
 
         if thumb_url:
-            self.image_loader = ImageLoader(thumb_url)
-            self.image_loader.finished.connect(self.set_thumbnail)
-            self.image_loader.start()
+            loader = ImageLoader(thumb_url)
+            self.active_threads.add(loader)
+            loader.finished.connect(self.set_thumbnail)
+            loader.finished.connect(lambda: self.cleanup_thread(loader))
+            loader.start()
         else:
             self.thumbnail_label.setText("No Thumbnail")
             
-        self.content_area.setVisible(True)
+        self.left_stack.setCurrentIndex(1) # Show content
+        self.update_options()
+
+    def on_analyze_finished(self, info, url_type):
+        if self.queue_active and getattr(self, 'current_queue_item', None):
+            self.process_queue_download(info, url_type)
+            return
+            
+        self.analyze_btn.setEnabled(True)
+        self.analyze_btn.setText("Analyze")
+        
+        self.display_video_info(info, url_type)
+        
         self.download_btn.setVisible(True)
         self.download_btn.setEnabled(True)
         self.download_btn.setText("START DOWNLOAD")
-        
-        self.update_options()
         
     def set_thumbnail(self, pixmap):
         scaled = pixmap.scaled(self.thumbnail_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -433,9 +521,260 @@ class MediaDownloaderGUI(QMainWindow):
         pass
 
     def on_download_finished(self, success, msg):
+        if self.queue_active and getattr(self, 'current_queue_item', None):
+            status = "Done" if success else "Failed"
+            if getattr(self, 'current_queue_widget', None):
+                 self.current_queue_widget.set_status(status, 100 if success else 0)
+            
+            self.queue_active = False
+            self.current_queue_item = None
+            self.check_queue_processing()
+            return
+
         self.download_btn.setEnabled(True)
         self.download_btn.setText("START DOWNLOAD")
         if success:
             QMessageBox.information(self, "Success", msg)
         else:
             QMessageBox.critical(self, "Failed", msg)
+
+    # QUEUE LOGIC ------------------------
+    
+    def process_queue(self):
+        self.check_queue_processing()
+
+    def add_url_to_queue(self):
+        url = self.url_input.text().strip()
+        if not url: return
+        item = self.add_queue_item(url)
+        self.url_input.clear()
+        
+        # Trigger background analysis
+        self.analysis_queue.append(item)
+        self.process_next_analysis()
+
+    def add_queue_item(self, url, status="Waiting..."):
+        item = QListWidgetItem()
+        widget = QueueItemWidget(url)
+        widget.set_status(status)
+        item.setSizeHint(widget.sizeHint())
+        
+        self.queue_list.addItem(item)
+        self.queue_list.setItemWidget(item, widget)
+        
+        widget.move_up.connect(lambda: self.move_queue_item(item, -1))
+        widget.move_down.connect(lambda: self.move_queue_item(item, 1))
+        widget.remove.connect(lambda: self.remove_queue_item(item))
+        return item
+
+    def move_queue_item(self, item, direction):
+        row = self.queue_list.row(item)
+        new_row = row + direction
+        if 0 <= new_row < self.queue_list.count():
+            widget = self.queue_list.itemWidget(item)
+            if widget.status_label.text() != "Pending": return
+            
+            url = widget.url
+            self.queue_list.takeItem(row)
+            self.queue_list.insertItem(new_row, item)
+            
+            new_widget = QueueItemWidget(url)
+            new_widget.set_status("Pending")
+            item.setSizeHint(new_widget.sizeHint())
+            self.queue_list.setItemWidget(item, new_widget)
+            
+            new_widget.move_up.connect(lambda: self.move_queue_item(item, -1))
+            new_widget.move_down.connect(lambda: self.move_queue_item(item, 1))
+            new_widget.remove.connect(lambda: self.remove_queue_item(item))
+            
+            self.queue_list.setCurrentRow(new_row)
+
+    def remove_queue_item(self, item):
+        row = self.queue_list.row(item)
+        self.queue_list.takeItem(row)
+
+    def check_queue_processing(self):
+        if self.queue_active: return
+        
+        for i in range(self.queue_list.count()):
+            item = self.queue_list.item(i)
+            widget = self.queue_list.itemWidget(item)
+            if widget.status_label.text() == "Ready" or widget.status_label.text() == "Waiting...":
+                self.start_queue_processing(item, widget)
+                break
+                
+    def process_next_analysis(self):
+        if self.is_analyzing_bg: return
+        if not self.analysis_queue: return
+        
+        item = self.analysis_queue[0] # Don't pop yet, wait for finish
+        widget = self.queue_list.itemWidget(item)
+        
+        if not widget: # Item removed?
+            self.analysis_queue.pop(0)
+            self.process_next_analysis()
+            return
+
+        self.is_analyzing_bg = True
+        widget.set_status("Analyzing...")
+        
+        # Use a separate thread for background analysis
+        thread = AnalyzeThread(self.core, widget.url)
+        thread.finished.connect(lambda i, t: self.on_bg_analyze_finished(item, i, t))
+        thread.error.connect(lambda e: self.on_bg_analyze_error(item, e))
+        self.run_thread_safe(thread)
+
+    def run_thread_safe(self, thread):
+        self.active_threads.add(thread)
+        thread.finished.connect(lambda: self.cleanup_thread(thread))
+        thread.start()
+
+    def cleanup_thread(self, thread):
+        if thread in self.active_threads:
+            self.active_threads.remove(thread)
+        thread.deleteLater()
+
+    def on_bg_analyze_finished(self, item, info, url_type):
+        if item in self.analysis_queue:
+            self.analysis_queue.remove(item)
+            
+        widget = self.queue_list.itemWidget(item)
+        if widget:
+            title = info.get('title', 'Unknown')
+            widget.set_title(title)
+            widget.set_status("Ready")
+            # Store info in item
+            item.setData(Qt.UserRole, {'info': info, 'type': url_type})
+            
+            # If this is the currently selected item or single item, show it?
+            if self.queue_list.currentItem() == item:
+                self.display_video_info(info, url_type)
+
+        self.is_analyzing_bg = False
+        self.process_next_analysis()
+
+    def on_bg_analyze_error(self, item, err):
+        if item in self.analysis_queue:
+            self.analysis_queue.remove(item)
+        widget = self.queue_list.itemWidget(item)
+        if widget:
+            widget.set_status("Analyze Failed")
+        self.is_analyzing_bg = False
+        self.process_next_analysis()
+
+    def on_queue_item_clicked(self, item):
+        try:
+            if item is None:
+                return
+            
+            # Check if widget still exists
+            widget = self.queue_list.itemWidget(item)
+            if widget is None:
+                return
+            
+            data = item.data(Qt.UserRole)
+            if data and isinstance(data, dict):
+                info = data.get('info')
+                url_type = data.get('type')
+                if info and url_type:
+                    self.display_video_info(info, url_type)
+            else:
+                # Item not yet analyzed, show URL in info label
+                self.left_stack.setCurrentIndex(1)
+                self.thumbnail_label.setText("Analyzing...")
+                self.info_label.setText(f"🔄 Waiting for analysis...\\n\\n📎 {widget.url}")
+                self.playlist_group.setVisible(False)
+        except RuntimeError:
+            # Widget was deleted during click handling
+            pass
+
+    def start_queue_processing(self, item, widget):
+        self.queue_active = True
+        self.current_queue_item = item
+        self.current_queue_widget = widget
+        
+        # Check if already analyzed
+        data = item.data(Qt.UserRole)
+        if data and isinstance(data, dict):
+            # Already has info, skip analyze step
+            self.process_queue_download(data['info'], data['type'])
+        else:
+            # Not analyzed? Wait for BG analyze or Force?
+            # Force analyze now (using main loop)
+            widget.set_status("Analyzing (Active)...", 0)
+            thread = AnalyzeThread(self.core, widget.url)
+            thread.finished.connect(self.on_analyze_finished)
+            thread.error.connect(self.on_queue_error)
+            self.run_thread_safe(thread)
+
+    def on_queue_error(self, err):
+        if getattr(self, 'current_queue_widget', None):
+            self.current_queue_widget.set_status("Error")
+        self.queue_active = False
+        self.current_queue_item = None
+        self.check_queue_processing()
+
+    def process_queue_download(self, info, url_type):
+        if not getattr(self, 'current_queue_widget', None): return
+        
+        # Display Info in Left Panel
+        self.display_video_info(info, url_type)
+        
+        self.current_queue_widget.set_status("Downloading...", 0)
+        
+        # Use Default Settings from UI
+        def_setting = self.def_fmt_combo.currentText()
+        is_audio = "Audio" in def_setting
+        
+        # "Video (Best)", "Audio (MP3)", "Video (1080p)", "Video (720p)"
+        target_format = "mp3" if is_audio else "mp4"
+        quality_pref = None
+        
+        if "1080p" in def_setting: quality_pref = 1080
+        elif "720p" in def_setting: quality_pref = 720
+        
+        data = {
+            'is_audio': is_audio,
+            'format': target_format,
+            'url': info.get('webpage_url', self.current_queue_widget.url),
+            'title': info.get('title', 'Unknown'),
+            'channel': info.get('uploader'),
+            'channel_id': info.get('uploader_id')
+        }
+        
+        path = self.path_input.text()
+        
+        if url_type == 'video':
+            # Auto-select quality based on preference
+            options = self.core.get_quality_options(info)
+            data['quality'] = None
+            if options:
+                if quality_pref:
+                    # Find closest match
+                    for key, details in options:
+                        if details['height'] == quality_pref:
+                            data['quality'] = details
+                            break
+                    if not data['quality']: data['quality'] = options[0][1] # Fallback to best
+                else:
+                    data['quality'] = options[0][1] # Best available
+            
+            thread = DownloadThread(self.core, 'video', data, path)
+            
+        elif url_type == 'playlist':
+            data['info'] = info
+            data['media_type'] = 'audio' if is_audio else 'video'
+            data['selected_indices'] = [] 
+            if quality_pref:
+                data['quality'] = {'height': quality_pref}
+            else:
+                data['quality'] = None
+            thread = DownloadThread(self.core, 'playlist', data, path)
+
+        thread.progress_update.connect(self.update_queue_progress)
+        thread.finished.connect(self.on_download_finished)
+        self.run_thread_safe(thread)
+
+    def update_queue_progress(self, percent, text):
+        if getattr(self, 'current_queue_widget', None):
+            self.current_queue_widget.set_status(text, percent)
