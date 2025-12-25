@@ -24,11 +24,11 @@ class VideoDownloader:
         return cache_path
     
     def _cleanup_cache(self, cache_dir):
-        """Remove cache directory if empty."""
+        """Remove cache directory and all its contents."""
         try:
-            if os.path.exists(cache_dir) and not os.listdir(cache_dir):
-                os.rmdir(cache_dir)
-        except:
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir, ignore_errors=True)
+        except Exception:
             pass
 
     def get_video_info(self, url):
