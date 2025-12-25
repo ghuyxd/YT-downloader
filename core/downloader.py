@@ -1,6 +1,7 @@
 import os
 import subprocess
 import shutil
+import uuid
 import yt_dlp
 from .utils import sanitize_filename, get_ffmpeg_path, check_ffmpeg
 
@@ -17,9 +18,11 @@ class VideoDownloader:
             missing.append('ffmpeg')
         return missing
     
-    def _get_cache_dir(self, download_dir):
+    def _get_cache_dir(self, download_dir, session_id=None):
         """Get cache directory path inside download directory."""
         cache_path = os.path.join(download_dir, CACHE_DIR)
+        if session_id:
+            cache_path = os.path.join(cache_path, session_id)
         os.makedirs(cache_path, exist_ok=True)
         return cache_path
     
@@ -71,7 +74,8 @@ class VideoDownloader:
         if not download_dir:
             download_dir = "downloads"
         os.makedirs(download_dir, exist_ok=True)
-        cache_dir = self._get_cache_dir(download_dir)
+        session_id = str(uuid.uuid4())
+        cache_dir = self._get_cache_dir(download_dir, session_id)
         
         if channel and channel_id:
             title += f" - [{channel} - @{channel_id}]"
@@ -84,7 +88,7 @@ class VideoDownloader:
         if os.path.exists(final_file):
             return True, "File already exists, skipping..."
         try:
-            direct_success = self._try_direct_download(url, selected_format, target_format, final_file, download_dir, progress_hooks)
+            direct_success = self._try_direct_download(url, selected_format, target_format, final_file, cache_dir, progress_hooks)
             if direct_success:
                 return True, "Downloaded successfully (direct)"
             if not check_ffmpeg():
@@ -98,9 +102,8 @@ class VideoDownloader:
         except Exception as e:
             return False, f"Download error: {str(e)}"
 
-    def _try_direct_download(self, url, selected_format, target_format, output_file, download_dir, progress_hooks=None):
+    def _try_direct_download(self, url, selected_format, target_format, output_file, cache_dir, progress_hooks=None):
         try:
-            cache_dir = self._get_cache_dir(download_dir)
             cache_output = os.path.join(cache_dir, os.path.basename(output_file))
             
             if selected_format:
@@ -229,7 +232,8 @@ class VideoDownloader:
         if not download_dir:
             download_dir = "downloads"
         os.makedirs(download_dir, exist_ok=True)
-        cache_dir = self._get_cache_dir(download_dir)
+        session_id = str(uuid.uuid4())
+        cache_dir = self._get_cache_dir(download_dir, session_id)
         
         if channel and channel_id:
             title += f" - [{channel} - @{channel_id}]"
