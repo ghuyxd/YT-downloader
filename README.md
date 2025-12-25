@@ -25,9 +25,18 @@ A modern YouTube Downloader application with a beautiful GUI, built using PySide
 pip install .
 ```
 
-### Option 2: Using install.bat (Windows)
+### Option 2: Using install scripts
 
-Double-click `install.bat` to set up the environment and install dependencies.
+**Windows:**
+```bash
+install.bat
+```
+
+**Linux:**
+```bash
+chmod +x install.sh
+./install.sh
+```
 
 ## Usage
 
@@ -37,10 +46,16 @@ Double-click `install.bat` to set up the environment and install dependencies.
 python main.py
 ```
 
-Or on Windows, use:
+Or use the run scripts:
 
+**Windows:**
 ```bash
 run.bat
+```
+
+**Linux:**
+```bash
+./run.sh
 ```
 
 ## Project Structure
@@ -58,7 +73,9 @@ YT-downloader/
 │   └── threads.py      # Background workers
 ├── main.py             # Application entry point
 ├── install.bat         # Windows installation script
+├── install.sh          # Linux installation script
 ├── run.bat             # Windows run script
+├── run.sh              # Linux run script
 └── pyproject.toml      # Project configuration
 ```
 
