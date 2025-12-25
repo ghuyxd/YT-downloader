@@ -1,15 +1,67 @@
 # YT Downloader
 
-A simple YouTube Downloader application with a GUI, built using PySide6 and yt-dlp.
+A modern YouTube Downloader application with a beautiful GUI, built using PySide6 and yt-dlp.
+
+## Features
+
+- 🎬 Download YouTube videos in various quality options
+- 🎵 Extract audio from videos (MP3, WAV, etc.)
+- 📋 Playlist support - download entire playlists
+- ⚙️ Customizable settings (output directory, format, quality)
+- 🖥️ Clean and intuitive graphical interface
+
+## Requirements
+
+- Python 3.11+
+- yt-dlp
+- PySide6
+- requests
 
 ## Installation
+
+### Option 1: Using pip
 
 ```bash
 pip install .
 ```
 
+### Option 2: Using install.bat (Windows)
+
+Double-click `install.bat` to set up the environment and install dependencies.
+
 ## Usage
 
+### Run the GUI Application
+
 ```bash
-python gui.py
+python main.py
 ```
+
+Or on Windows, use:
+
+```bash
+run.bat
+```
+
+## Project Structure
+
+```
+YT-downloader/
+├── core/               # Core functionality
+│   ├── downloader.py   # Download logic
+│   ├── playlist.py     # Playlist handling
+│   └── utils.py        # Utility functions
+├── gui/                # GUI components
+│   ├── main_window.py  # Main application window
+│   ├── components.py   # Reusable UI components
+│   ├── settings.py     # Settings dialog
+│   └── threads.py      # Background workers
+├── main.py             # Application entry point
+├── install.bat         # Windows installation script
+├── run.bat             # Windows run script
+└── pyproject.toml      # Project configuration
+```
+
+## License
+
+MIT License
